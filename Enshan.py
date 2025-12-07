@@ -17,15 +17,13 @@ def send_message(content):
     """
     WxPusher 推送函数
     """
-    api_url = 'https://wxpusher.zjiecode.com/api/send/message'
+    api_url = 'https://sctapi.ftqq.com/SCT152534TSZyMr41S3EiZ2a3ipdzFiAGI.send'
     headers = {
         'Content-Type': 'application/json'
     }
     data = {
-        "appToken": "AT_uYfKbWHkCwomUV4cz4AASjI85XGpSvP3",
-        "content": content,
-        "contentType": 1,
-        "topicIds": [32226]
+        "title": "恩山论坛签到",
+        "content": content
     }
     try:
         response = requests.post(api_url, headers=headers, data=json.dumps(data))
