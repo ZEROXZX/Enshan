@@ -3,12 +3,10 @@ import json
 import os
 import sys
 import re
-import urllib3
+import time
 
-# 禁用 SSL 警告，防止 verify=False 时报错
-urllib3.disable_warnings()
-
-sys.path.append('.')
+# 禁用 urllib3 警告
+requests.packages.urllib3.disable_warnings()
 
 # 获取环境变量
 cookie = os.environ.get("cookie_enshan")
@@ -32,63 +30,110 @@ def send_message(content):
         print(f"推送失败: {e}")
         return {"code": 0, "msg": str(e)}
 
-def run(current_cookie):
+def get_formhash(session):
     """
-    执行签到/查询逻辑
+    从页面获取 formhash (防跨站攻击 token)，这是新脚本的关键步骤
+    """
+    try:
+        url = "https://www.right.com.cn/forum/forum.php"
+        response = session.get(url, timeout=15)
+        response.raise_for_status()
+        html = response.text
+        
+        # 使用正则提取 formhash
+        m = re.search(r'name=["\']formhash["\']\s+value=["\']([0-9a-fA-F]+)["\']', html)
+        if not m:
+            m = re.search(r"formhash\s*[:=]\s*['\"]([0-9a-fA-F]+)['\"]", html)
+        if not m:
+            m = re.search(r'name=["\']formhash["\']\s+value=["\']([^"\']+)["\']', html)
+            
+        if m:
+            return m.group(1)
+        else:
+            return None
+    except Exception as e:
+        print(f"获取formhash异常: {e}")
+        return None
+
+def get_user_info(session):
+    """
+    获取积分和恩山币信息
     """
     msg = ""
-    # 模拟浏览器 User-Agent，使用新脚本中的配置
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 6.3; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.5359.125 Safari/537.36",
-        "Cookie": current_cookie,
-    }
+    try:
+        url = "https://www.right.com.cn/FORUM/home.php?mod=spacecp&ac=credit&showcredit=1"
+        response = session.get(url, timeout=15)
+        html = response.text
+        
+        # 使用正则提取积分信息
+        coin_match = re.findall("恩山币: </em>(.*?)&nbsp;", html)
+        point_match = re.findall("<em>积分: </em>(.*?)<span", html)
+        
+        if coin_match:
+            msg += f" | 恩山币: {coin_match[0]}"
+        if point_match:
+            msg += f" | 积分: {point_match[0]}"
+            
+    except Exception as e:
+        msg += f" | 获取积分失败: {str(e)}"
+    return msg
+
+def run(current_cookie):
+    msg = ""
+    session = requests.Session()
     
-    # 恩山积分页面
-    url = "https://www.right.com.cn/FORUM/home.php?mod=spacecp&ac=credit&showcredit=1"
+    # 使用新脚本的 Headers，模拟更真实
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Referer": "https://www.right.com.cn/forum/",
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "Cookie": current_cookie,
+    })
 
     try:
-        # verify=False 避免 SSL 证书报错，timeout 防止卡死
-        response = requests.get(url, headers=headers, verify=False, timeout=120)
-        response.encoding = 'utf-8' # 确保编码正确
+        # 1. 获取 formhash
+        formhash = get_formhash(session)
+        if not formhash:
+            return "失败：Cookie可能失效，无法获取formhash"
+
+        # 2. 执行签到 (POST请求)
+        sign_url = "https://www.right.com.cn/forum/plugin.php?id=erling_qd:action&action=sign"
+        payload = {"formhash": formhash}
         
-        # 使用正则提取积分信息 (核心修改部分)
-        if "恩山币" in response.text:
-            try:
-                # 尝试提取恩山币
-                coin_match = re.findall(r"恩山币: </em>(.*?)&nbsp;", response.text)
-                coin = coin_match[0] if coin_match else "未知"
-                
-                # 尝试提取积分
-                point_match = re.findall(r"<em>积分: </em>(.*?)<span", response.text)
-                point = point_match[0] if point_match else "未知"
-                
-                msg += f"【签到成功】\n恩山币: {coin}\n积分: {point}"
-            except Exception as e:
-                msg += f"【签到异常】页面访问成功但解析数值失败: {str(e)}"
-        elif "登录" in response.text and "注册" in response.text:
-             msg += "【签到失败】Cookie已失效，请重新获取"
-        else:
-             msg += "【签到失败】未能匹配到相关信息，可能是网站改版"
-             
-    except requests.exceptions.RequestException as e:
-        msg = f"【网络错误】连接网站失败: {str(e)}"
+        response = session.post(sign_url, data=payload, timeout=15)
+        
+        # 解析返回的 JSON
+        try:
+            data = response.json()
+            if data.get("success"):
+                days = data.get("continuous_days", "?")
+                raw_msg = data.get("message", "签到成功")
+                msg += f"签到结果: {raw_msg} (已连签{days}天)"
+            else:
+                # 即使 success 为 false，可能是今日已签到
+                raw_msg = data.get("message", "签到失败")
+                msg += f"签到反馈: {raw_msg}"
+        except json.JSONDecodeError:
+             msg += f"签到异常: 返回非JSON数据 (Code: {response.status_code})"
+
+        # 3. 获取用户信息
+        msg += get_user_info(session)
+
     except Exception as e:
-        msg = f"【脚本错误】发生未知错误: {str(e)}"
+        msg = f'脚本执行出错: {str(e)}'
         
-    return msg + '\n'
+    return msg
 
 def main():
-    """
-    主程序
-    """
     global cookie
-    msg = "【恩山论坛签到任务】\n"
+    msg_all = ""
     
     if not cookie:
-        print("未检测到 cookie_enshan 环境变量")
+        print("未找到 cookie_enshan 环境变量")
         return
 
-    # 处理多账号，支持换行符或\n字符串分割
+    # 处理多账号
     if "\\n" in cookie:
         clist = cookie.split("\\n")
     else:
@@ -96,22 +141,24 @@ def main():
         
     i = 0
     while i < len(clist):
-        account_cookie = clist[i].strip()
-        if account_cookie: # 跳过空行
-            msg += f"--- 第 {i+1} 个账号 ---\n"
-            msg += run(account_cookie)
+        account_msg = f"账号 {i+1}: "
+        current_cookie = clist[i].strip()
+        if current_cookie:
+            log_str = run(current_cookie)
+            account_msg += log_str
+            print(account_msg)
+            msg_all += account_msg + "\n"
         i += 1
         
-    print(msg)
-    
+        # 账号间稍微暂停，避免请求过快
+        if i < len(clist):
+            time.sleep(2)
+
     # 推送消息
-    log = send_message(msg)
-    print("推送结果:", log)
+    push_log = send_message(msg_all[:-1])
+    print(f"推送结果: {push_log}")
 
 if __name__ == "__main__":
-    print("----------恩山论坛开始尝试签到----------")
-    if cookie:
-        main()
-    else:
-        print("请在环境变量中设置 cookie_enshan")
-    print("----------恩山论坛签到执行完毕----------")
+    print("----------恩山论坛签到开始----------")
+    main()
+    print("----------恩山论坛签到结束----------")
